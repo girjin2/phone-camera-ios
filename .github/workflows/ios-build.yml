@@ -1,1 +1,200 @@
+name: iOS build and TestFlight
 
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy_testflight:
+        description: "Build a signed archive and upload to TestFlight"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: macos-26
+    env:
+      CI_BUNDLE_ID: com.churchstudio.phonecamera.ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Xcode 26+
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee xcode-version.log
+          XCODE_MAJOR="$(xcodebuild -version | awk '/Xcode/{split($2,a,"."); print a[1]}')"
+          if [[ -z "$XCODE_MAJOR" || "$XCODE_MAJOR" -lt 26 ]]; then
+            echo "::error::Xcode 26 or later is required for App Store Connect uploads in 2026."
+            exit 1
+          fi
+
+      - name: Compile for iOS Simulator without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mkdir -p build
+          xcodebuild -project ChurchStudioPhoneCameraIOS.xcodeproj \
+            -scheme ChurchStudioPhoneCameraIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="$CI_BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            build | tee xcodebuild-simulator.log
+
+      - name: Upload compile artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-compile-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            xcode-version.log
+            xcodebuild-simulator.log
+            build/DerivedData/Build/Products/Debug-iphonesimulator/ChurchStudioPhoneCameraIOS.app
+
+  testflight:
+    needs: compile
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_testflight }}
+    runs-on: macos-26
+    env:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
+      IOS_DISTRIBUTION_CERT_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERT_BASE64 }}
+      IOS_DISTRIBUTION_CERT_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERT_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      ARCHIVE_PATH: ${{ github.workspace }}/build/ChurchStudioPhoneCameraIOS.xcarchive
+      IPA_OUTPUT_DIR: ${{ github.workspace }}/build/ipa
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            APP_STORE_CONNECT_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_API_KEY_BASE64 \
+            APPLE_TEAM_ID \
+            IOS_BUNDLE_ID \
+            IOS_DISTRIBUTION_CERT_BASE64 \
+            IOS_DISTRIBUTION_CERT_PASSWORD \
+            IOS_PROVISIONING_PROFILE_BASE64 \
+            KEYCHAIN_PASSWORD
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required GitHub Secret: $name"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "TestFlight deployment was requested, but signing credentials are incomplete."
+            exit 1
+          fi
+
+      - name: Verify Xcode 26+
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee xcode-version.log
+          XCODE_MAJOR="$(xcodebuild -version | awk '/Xcode/{split($2,a,"."); print a[1]}')"
+          if [[ -z "$XCODE_MAJOR" || "$XCODE_MAJOR" -lt 26 ]]; then
+            echo "::error::Xcode 26 or later is required."
+            exit 1
+          fi
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Install certificate and provisioning profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+
+          printf '%s' "$IOS_DISTRIBUTION_CERT_BASE64" | base64 -D > "$CERT_PATH"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$IOS_DISTRIBUTION_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PROFILE_PLIST")
+          PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")
+          PROFILE_TEAM=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_PLIST")
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          if [[ "$PROFILE_TEAM" != "$APPLE_TEAM_ID" ]]; then
+            echo "::error::Provisioning profile TeamIdentifier ($PROFILE_TEAM) does not match APPLE_TEAM_ID ($APPLE_TEAM_ID)"
+            exit 1
+          fi
+          if [[ "$PROFILE_APP_ID" != *".$IOS_BUNDLE_ID" ]]; then
+            echo "::error::Provisioning profile application-identifier ($PROFILE_APP_ID) does not match IOS_BUNDLE_ID ($IOS_BUNDLE_ID)"
+            exit 1
+          fi
+          echo "IOS_PROVISIONING_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+
+      - name: Archive signed iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mkdir -p build
+          xcodebuild -project ChurchStudioPhoneCameraIOS.xcodeproj \
+            -scheme ChurchStudioPhoneCameraIOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            archive \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$IOS_BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            MARKETING_VERSION="1.0" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROVISIONING_PROFILE_NAME" \
+            | tee xcodebuild-archive.log
+
+      - name: Export IPA and upload TestFlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          bundle exec fastlane ios testflight | tee fastlane-testflight.log
+
+      - name: Upload signed build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            xcode-version.log
+            xcodebuild-archive.log
+            fastlane-testflight.log
+            build/ipa/*.ipa
