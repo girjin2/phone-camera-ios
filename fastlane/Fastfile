@@ -1,0 +1,27 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Export the already archived app and upload it to TestFlight using an App Store Connect API key"
+  lane :testflight do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("APP_STORE_CONNECT_KEY_ID"),
+      issuer_id: ENV.fetch("APP_STORE_CONNECT_ISSUER_ID"),
+      key_content: ENV.fetch("APP_STORE_CONNECT_API_KEY_BASE64"),
+      is_key_content_base64: true
+    )
+    build_app(
+      archive_path: ENV.fetch("ARCHIVE_PATH"),
+      export_method: "app-store-connect",
+      export_options: {
+        method: "app-store-connect",
+        signingStyle: "manual",
+        teamID: ENV.fetch("APPLE_TEAM_ID"),
+        provisioningProfiles: { ENV.fetch("IOS_BUNDLE_ID") => ENV.fetch("IOS_PROVISIONING_PROFILE_NAME") }
+      },
+      output_directory: ENV.fetch("IPA_OUTPUT_DIR"),
+      output_name: "ChurchStudioPhoneCamera-iOS.ipa",
+      skip_build_archive: true
+    )
+    upload_to_testflight(api_key: api_key, ipa: lane_context[SharedValues::IPA_OUTPUT_PATH], skip_waiting_for_build_processing: true)
+  end
+end

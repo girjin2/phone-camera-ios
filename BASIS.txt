@@ -1,0 +1,7 @@
+User-selected Android reference APK:
+ChurchStudioPhoneCamera-V3_8_7-debug.apk
+SHA-256: b098471012c6739e960294953a5525fb73183ff7bbf6ff6f9b2834d8e137893f
+
+Local V3.8.7 source package used to map the exact CSUV/header/encoder settings:
+PhoneCamera_V3_8_7_QTI_LOW_LATENCY.zip
+SHA-256: 906fc148611a70b4e0fdcd0fde606ef30c88896b75b35ca005747637336743f0
