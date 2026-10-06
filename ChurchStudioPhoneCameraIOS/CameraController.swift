@@ -158,7 +158,7 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.effectiveFPS = chosenFPS
             self.zoom = clampedZoom
-            self.statusText = "\(usingFrontCamera ? "FRONT" : "BACK") \(dims.width)x\(dims.height)@\(chosenFPS) VT-H264 ON"
+            self.statusText = "\(self.usingFrontCamera ? "FRONT" : "BACK") \(dims.width)x\(dims.height)@\(chosenFPS) VT-H264 ON"
         }
     }
 
