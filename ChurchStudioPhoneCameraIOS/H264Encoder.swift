@@ -56,9 +56,17 @@ final class H264Encoder {
         // For ChurchStudio this must stay on the hardware path. If hardware H.264
         // cannot be allocated, fail loudly instead of silently falling back to a
         // software encoder with much higher and less predictable latency.
-        let encoderSpecification = [
-            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: kCFBooleanTrue as Any
-        ] as CFDictionary
+        let encoderSpecification: CFDictionary?
+        if #available(iOS 17.4, *) {
+            encoderSpecification = [
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: kCFBooleanTrue as Any
+            ] as CFDictionary
+        } else {
+            // iOS 16.0-17.3: the public hardware-requirement key is not exposed
+            // by the SDK. Keep VideoToolbox real-time settings and allow session
+            // creation; hardware use cannot be verified with the 17.4+ property.
+            encoderSpecification = nil
+        }
 
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(
@@ -94,18 +102,24 @@ final class H264Encoder {
             throw NSError(domain: "ChurchStudio.H264", code: Int(prepare), userInfo: [NSLocalizedDescriptionKey: "VT prepare failed \(prepare)"])
         }
 
-        let usingHardware = copyBoolProperty(created, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
         let encoderID = copyStringProperty(created, key: kVTCompressionPropertyKey_EncoderID) ?? "unknown"
-        guard usingHardware == true else {
-            stop()
-            throw NSError(domain: "ChurchStudio.H264", code: -2, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox did not confirm hardware encoding"])
+        let hardwareStatus: String
+        if #available(iOS 17.4, *) {
+            let usingHardware = copyBoolProperty(created, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
+            guard usingHardware == true else {
+                stop()
+                throw NSError(domain: "ChurchStudio.H264", code: -2, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox did not confirm hardware encoding"])
+            }
+            hardwareStatus = "hardware=1"
+        } else {
+            hardwareStatus = "hardware=unverified"
         }
 
         frameCount = 0
         cachedConfig.removeAll(keepingCapacity: true)
         delegate?.encoder(
             self,
-            didChangeStatus: "VT H.264 ON \(width)x\(height)@\(fps) bitrate=\(bitrate) hardware=1 encoder=\(encoderID) realTime=1 reorder=0"
+            didChangeStatus: "VT H.264 ON \(width)x\(height)@\(fps) bitrate=\(bitrate) \(hardwareStatus) encoder=\(encoderID) realTime=1 reorder=0"
         )
     }
 
